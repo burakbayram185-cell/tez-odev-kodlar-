@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Süper Chat - Uçtan Uca Şifreli</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
+    
+    <style>
+        /* SENİN TASARIMIN - HİÇ DOKUNULMADI */
+        body { 
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+            margin: 0; 
+            padding: 0;
+            background: linear-gradient(45deg, #ff9a9e, #fecfef, #a1c4fd, #c2e9fb);
+            background-size: 400% 400%;
+            animation: arkaPlanAnimasyonu 15s ease infinite;
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        @keyframes arkaPlanAnimasyonu {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+
+        #chat-container {
+            width: 100%;
+            max-width: 600px; /* Hedef kutusu sığsın diye biraz genişletildi */
+            height: 85vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.2);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            position: relative;
+        }
+
+        #header {
+            background: #007bff;
+            color: white;
+            padding: 1rem;
+            text-align: center;
+            font-size: 1.2rem;
+            font-weight: bold;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            z-index: 10;
+        }
+
+        #messages { 
+            list-style-type: none; 
+            margin: 0; 
+            padding: 1rem; 
+            flex-grow: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        #messages > li { 
+            padding: 0.75rem 1rem; 
+            background: #f1f0f0; 
+            border-radius: 15px;
+            border-bottom-left-radius: 2px;
+            max-width: 80%;
+            align-self: flex-start;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+            word-wrap: break-word;
+        }
+
+        /* YENİ: Anlamsız (Şifreli) mesajlar için tasarım */
+        #messages > li.garbage {
+            background: #ffe6e6;
+            color: #b30000;
+            font-style: italic;
+            font-size: 0.9em;
+            border: 1px dashed #ff9999;
+        }
+
+        #typing-indicator { 
+            font-style: italic; 
+            color: #888; 
+            padding: 0 1rem 0.5rem 1rem; 
+            font-size: 0.85rem; 
+            min-height: 1.2rem;
+        }
+
+        #form { 
+            background: #fafafa; 
+            padding: 0.75rem; 
+            display: flex; 
+            border-top: 1px solid #eee; 
+        }
+
+        /* YENİ: Hedef input kutusu tasarımı (Senin temanla birebir) */
+        #targetInput {
+            border: 1px solid #ddd;
+            padding: 0.75rem;
+            border-radius: 2rem;
+            margin-right: 0.5rem;
+            outline: none;
+            width: 80px;
+            text-align: center;
+            font-weight: bold;
+            transition: border-color 0.3s;
+        }
+        #targetInput:focus { border-color: #007bff; }
+
+        #input { 
+            border: 1px solid #ddd; 
+            padding: 0.75rem 1rem; 
+            flex-grow: 1; 
+            border-radius: 2rem; 
+            margin-right: 0.5rem; 
+            outline: none; 
+            transition: border-color 0.3s;
+        }
+        
+        #input:focus { border-color: #007bff; }
+
+        #form > button { 
+            background: #007bff; 
+            border: none; 
+            padding: 0 1.5rem; 
+            border-radius: 2rem; 
+            color: white; 
+            cursor: pointer; 
+            font-weight: bold;
+            transition: background 0.3s, transform 0.1s;
+        }
+
+        #form > button:hover { background: #0056b3; }
+        #form > button:active { transform: scale(0.95); }
+    </style>
+</head>
+<body>
+    
+    <div id="chat-container">
+        <div id="header" id="chatTitle">Canlı Sohbet Odası (Güvenli Bağlantı Bekleniyor...)</div>
+
+        <ul id="messages"></ul>
+        <div id="typing-indicator"></div>
+
+        <form id="form" action="">
+            <input id="targetInput" autocomplete="off" placeholder="Kime?" title="Mesajın şifreleneceği kişinin adını yazın" />
+            <input id="input" autocomplete="off" placeholder="Mesajınızı yazın..." />
+            <button>Gönder</button>
+        </form>
+    </div>
+
+    <script>
+        const socket = io();
+        const form = document.getElementById('form');
+        const input = document.getElementById('input');
+        const targetInput = document.getElementById('targetInput');
+        const messages = document.getElementById('messages');
+        const typingIndicator = document.getElementById('typing-indicator');
+
+        // Diffie-Hellman Parametreleri
+        let myId = "";
+        let roomPass = "";
+        let DH_P = null; 
+        let DH_G = null;          
+        let myPrivateKey = null;
+        let myCalculatedPublicKey = null;
+        let groupPublicKeys = {};
+
+        // Büyük Sayılar İçin Modüler Üs Alma (Diffie-Hellman Motoru)
+        function power(base, exp, mod) {
+            let res = 1n;
+            base = BigInt(base) % BigInt(mod);
+            exp = BigInt(exp);
+            while (exp > 0n) {
+                if (exp % 2n === 1n) res = (res * base) % BigInt(mod);
+                base = (base * base) % BigInt(mod);
+                exp = exp / 2n;
+            }
+            return res;
+        }
+
+        // 1. Sunucu P ve G sayılarını gönderdiğinde
+        socket.on('adminParameters', (data) => {
+            DH_P = data.p;
+            DH_G = data.g;
+            
+            // Gizli ve Açık Anahtarlarımızı Üretiyoruz
+            myPrivateKey = Math.floor(Math.random() * 90000) + 10000;
+            myCalculatedPublicKey = Number(power(DH_G, myPrivateKey, DH_P));
+            
+            // Kullanıcıdan İsim ve Şifre İstiyoruz
+            myId = prompt("Sohbete katılmak için adınızı girin:").trim().toLowerCase();
+            roomPass = prompt("Yöneticinin belirlediği Oda Şifresini girin:");
+            
+            if (myId && roomPass) {
+                // Sunucuya kapıyı açması için bilgileri yolluyoruz
+                socket.emit('join', { 
+                    user_id: myId, 
+                    public_key: myCalculatedPublicKey,
+                    room_password: roomPass
+                });
+            } else {
+                alert("İsim veya şifre boş bırakılamaz, sayfayı yenileyin.");
+            }
+        });
+
+        // 2. Şifre Onaylanırsa
+        socket.on('joinSuccess', (data) => {
+            document.getElementById('header').innerText = `🛡️ Güvenli Sohbet | Sen: ${myId.toUpperCase()}`;
+        });
+
+        // 3. Şifre Yanlışsa
+        socket.on('joinError', (data) => {
+            alert(data.message);
+            window.location.reload();
+        });
+
+        // 4. Odadaki Kişilerin Açık Anahtarlarını Al
+        socket.on('updateUserList', (users) => {
+            groupPublicKeys = users; // Kimin anahtarı ne, hafızaya atıyoruz
+        });
+
+        // 5. Mesaj Gönderme İşlemi (AES Şifreleme)
+        form.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const msgText = input.value.trim();
+            const targetUser = targetInput.value.trim().toLowerCase();
+
+            if (msgText && targetUser) {
+                if (!groupPublicKeys[targetUser]) {
+                    alert(`"${targetUser}" adında biri odada yok veya anahtarı alınamadı!`);
+                    return;
+                }
+
+                // Ekrana kendi gönderdiğimiz mesajı yazdır
+                const item = document.createElement('li');
+                item.innerHTML = `<b>Sen (Hedef: ${targetUser.toUpperCase()}):</b> ${msgText}`;
+                item.style.alignSelf = 'flex-end';
+                item.style.background = '#d9fdd3';
+                messages.appendChild(item);
+                messages.scrollTop = messages.scrollHeight;
+
+                // --- DIFFIE-HELLMAN + AES ŞİFRELEME ---
+                const targetPubKey = groupPublicKeys[targetUser];
+                const sharedSecret = Number(power(targetPubKey, myPrivateKey, DH_P));
+                const aesKey = "DH_KEY_" + sharedSecret; // Eşsiz kilit üretildi
+                const encryptedText = CryptoJS.AES.encrypt(msgText, aesKey).toString();
+
+                const msgId = 'msg_' + Date.now();
+                socket.emit('sendMessage', {
+                    messageId: msgId,
+                    senderId: myId,
+                    targetId: targetUser,
+                    encryptedContent: encryptedText
+                });
+
+                input.value = '';
+                typingIndicator.textContent = ''; 
+            } else {
+                alert("Lütfen mesajı ve Kime (Hedef) göndereceğinizi yazın!");
+            }
+        });
+
+        // 6. Mesaj Alma İşlemi (AES Şifre Çözme)
+        socket.on('receiveMessage', (data) => {
+            const item = document.createElement('li');
+
+            if (data.targetId === myId) {
+                // Mesaj BANA geldiyse -> Şifreyi Çöz (AES Decrypt)
+                const senderPubKey = groupPublicKeys[data.senderId];
+                const sharedSecret = Number(power(senderPubKey, myPrivateKey, DH_P));
+                const aesKey = "DH_KEY_" + sharedSecret;
+
+                try {
+                    const bytes = CryptoJS.AES.decrypt(data.encryptedContent, aesKey);
+                    const decryptedText = bytes.toString(CryptoJS.enc.Utf8);
+                    
+                    if(decryptedText) {
+                        item.innerHTML = `<b>${data.senderId.toUpperCase()}:</b> <span style="color:green;">🔓 ${decryptedText}</span>`;
+                        // Okundu bildirimi at
+                        socket.emit('messageDelivered', { messageId: data.messageId, senderId: data.senderId, reader: myId });
+                    } else { throw new Error(); }
+                } catch (e) {
+                    item.innerHTML = `<b>${data.senderId.toUpperCase()}:</b> ⚠️ Şifre çözülemedi.`;
+                    item.className = 'garbage';
+                }
+            } else {
+                // Mesaj BAŞKASINA gidiyorsa -> Sadece Şifreli Çorbayı (Anlamsız Metin) Göster
+                item.innerHTML = `<b>${data.senderId.toUpperCase()} ➔ ${data.targetId.toUpperCase()}</b><br><i>[Şifreli Veri]: ${data.encryptedContent.substring(0, 30)}...</i>`;
+                item.className = 'garbage';
+            }
+
+            messages.appendChild(item); 
+            messages.scrollTop = messages.scrollHeight;
+            typingIndicator.textContent = '';
+        });
+
+        // Yazıyor efekti
+        let typingTimer;
+        input.addEventListener('input', () => {
+            socket.emit('typing', myId);
+        });
+
+        socket.on('typing', (yazanKisi) => {
+            if(yazanKisi !== myId) {
+                typingIndicator.textContent = `${yazanKisi.toUpperCase()} yazıyor...`;
+                clearTimeout(typingTimer);
+                typingTimer = setTimeout(() => {
+                    typingIndicator.textContent = '';
+                }, 2000);
+            }
+        });
+    </script>
+</body>
+</html>
